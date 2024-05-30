@@ -31,17 +31,22 @@ import org.locationtech.jts.geom.util.GeometryTransformer;
 import org.locationtech.jts.io.WKBReader;
 import org.locationtech.jts.io.WKTReader;
 import org.locationtech.jts.precision.GeometryPrecisionReducer;
+import org.locationtech.proj4j.CRSFactory;
+import org.locationtech.proj4j.CoordinateReferenceSystem;
+import org.locationtech.proj4j.CoordinateTransform;
+import org.locationtech.proj4j.CoordinateTransformFactory;
+import org.locationtech.proj4j.ProjCoordinate;
+
 
 /**
  * A collection of utilities for working with JTS data structures and geographic data.
  * <p>
- * "world" coordinates in this class refer to web mercator coordinates where the top-left/northwest corner of the map is
- * (0,0) and bottom-right/southeast corner is (1,1).
+ * "world" coordinates in this class refer to EPSG 3031 coordinates.
  */
 public class GeoUtils {
 
   /** Rounding precision for 256x256px tiles encoded using 4096 values. */
-  public static final PrecisionModel TILE_PRECISION = new PrecisionModel(4096d / 256d);
+  public static final PrecisionModel TILE_PRECISION = new PrecisionModel(1000d);  // Adjust as needed for EPSG 3031
   public static final GeometryFactory JTS_FACTORY = new GeometryFactory(PackedCoordinateSequenceFactory.DOUBLE_FACTORY);
 
   public static final Geometry EMPTY_GEOMETRY = JTS_FACTORY.createGeometryCollection();
@@ -54,39 +59,52 @@ public class GeoUtils {
   private static final Point[] EMPTY_POINT_ARRAY = new Point[0];
   private static final double WORLD_RADIUS_METERS = 6_378_137;
   public static final double WORLD_CIRCUMFERENCE_METERS = Math.PI * 2 * WORLD_RADIUS_METERS;
-  private static final double RADIANS_PER_DEGREE = Math.PI / 180;
-  private static final double DEGREES_PER_RADIAN = 180 / Math.PI;
   private static final double LOG2 = Math.log(2);
+  
+
+  private static final CRSFactory crsFactory = new CRSFactory();
+  private static final CoordinateReferenceSystem epsg3031 = crsFactory.createFromName("EPSG:3031");
+  private static final CoordinateReferenceSystem wgs84 = crsFactory.createFromName("EPSG:4326");
+  private static final CoordinateTransformFactory ctFactory = new CoordinateTransformFactory();
+  private static final CoordinateTransform transformToWGS84 = ctFactory.createTransform(epsg3031, wgs84);
+  private static final CoordinateTransform transformToEPSG3031 = ctFactory.createTransform(wgs84, epsg3031);
+
   /**
-   * Transform web mercator coordinates where top-left corner of the planet is (0,0) and bottom-right is (1,1) to
-   * latitude/longitude coordinates.
+   * Transform EPSG 3031 coordinates to latitude/longitude coordinates.
    */
   private static final GeometryTransformer UNPROJECT_WORLD_COORDS = new GeometryTransformer() {
     @Override
     protected CoordinateSequence transformCoordinates(CoordinateSequence coords, Geometry parent) {
       CoordinateSequence copy = new PackedCoordinateSequence.Double(coords.size(), 2, 0);
       for (int i = 0; i < coords.size(); i++) {
-        copy.setOrdinate(i, 0, getWorldLon(coords.getX(i)));
-        copy.setOrdinate(i, 1, getWorldLat(coords.getY(i)));
+        ProjCoordinate srcCoord = new ProjCoordinate(coords.getX(i), coords.getY(i));
+        ProjCoordinate destCoord = new ProjCoordinate();
+        transformToWGS84.transform(srcCoord, destCoord);
+        copy.setOrdinate(i, 0, destCoord.x);
+        copy.setOrdinate(i, 1, destCoord.y);
       }
       return copy;
     }
   };
+
   /**
-   * Transform latitude/longitude coordinates to web mercator where top-left corner of the planet is (0,0) and
-   * bottom-right is (1,1).
+   * Transform latitude/longitude coordinates to EPSG 3031.
    */
   private static final GeometryTransformer PROJECT_WORLD_COORDS = new GeometryTransformer() {
     @Override
     protected CoordinateSequence transformCoordinates(CoordinateSequence coords, Geometry parent) {
       CoordinateSequence copy = new PackedCoordinateSequence.Double(coords.size(), 2, 0);
       for (int i = 0; i < coords.size(); i++) {
-        copy.setOrdinate(i, 0, getWorldX(coords.getX(i)));
-        copy.setOrdinate(i, 1, getWorldY(coords.getY(i)));
+        ProjCoordinate srcCoord = new ProjCoordinate(coords.getX(i), coords.getY(i));
+        ProjCoordinate destCoord = new ProjCoordinate();
+        transformToEPSG3031.transform(srcCoord, destCoord);
+        copy.setOrdinate(i, 0, destCoord.x);
+        copy.setOrdinate(i, 1, destCoord.y);
       }
       return copy;
     }
   };
+    
   private static final double MAX_LAT = getWorldLat(-0.1);
   private static final double MIN_LAT = getWorldLat(1.1);
   // to pack latitude/longitude into a single long, we round them to 31 bits of precision
@@ -107,84 +125,83 @@ public class GeoUtils {
   private GeoUtils() {}
 
   /**
-   * Returns a copy of {@code geom} transformed from latitude/longitude coordinates to web mercator where top-left
-   * corner of the planet is (0,0) and bottom-right is (1,1).
+   * Returns a copy of {@code geom} transformed from latitude/longitude coordinates to EPSG 3031.
    */
   public static Geometry latLonToWorldCoords(Geometry geom) {
     return PROJECT_WORLD_COORDS.transform(geom);
   }
 
   /**
-   * Returns a copy of {@code geom} transformed from web mercator where top-left corner of the planet is (0,0) and
-   * bottom-right is (1,1) to latitude/longitude.
+   * Returns a copy of {@code geom} transformed from EPSG 3031 to latitude/longitude coordinates.
    */
   public static Geometry worldToLatLonCoords(Geometry geom) {
     return UNPROJECT_WORLD_COORDS.transform(geom);
   }
 
   /**
-   * Returns a copy of {@code worldBounds} transformed from web mercator where top-left corner of the planet is (0,0)
-   * and bottom-right is (1,1) to latitude/longitude.
+   * Returns a copy of {@code worldBounds} transformed from EPSG 3031 coordinates to latitude/longitude.
    */
   public static Envelope toLatLonBoundsBounds(Envelope worldBounds) {
-    return new Envelope(
-      getWorldLon(worldBounds.getMinX()),
-      getWorldLon(worldBounds.getMaxX()),
-      getWorldLat(worldBounds.getMinY()),
-      getWorldLat(worldBounds.getMaxY()));
+    ProjCoordinate min = new ProjCoordinate(worldBounds.getMinX(), worldBounds.getMinY());
+    ProjCoordinate max = new ProjCoordinate(worldBounds.getMaxX(), worldBounds.getMaxY());
+    ProjCoordinate minLatLon = new ProjCoordinate();
+    ProjCoordinate maxLatLon = new ProjCoordinate();
+    transformToWGS84.transform(min, minLatLon);
+    transformToWGS84.transform(max, maxLatLon);
+    return new Envelope(minLatLon.x, maxLatLon.x, minLatLon.y, maxLatLon.y);
   }
 
   /**
-   * Returns a copy of {@code lonLatBounds} transformed from latitude/longitude coordinates to web mercator where
-   * top-left corner of the planet is (0,0) and bottom-right is (1,1).
+   * Returns a copy of {@code lonLatBounds} transformed from latitude/longitude coordinates to EPSG 3031.
    */
   public static Envelope toWorldBounds(Envelope lonLatBounds) {
-    return new Envelope(
-      getWorldX(lonLatBounds.getMinX()),
-      getWorldX(lonLatBounds.getMaxX()),
-      getWorldY(lonLatBounds.getMinY()),
-      getWorldY(lonLatBounds.getMaxY())
-    );
+    ProjCoordinate min = new ProjCoordinate(lonLatBounds.getMinX(), lonLatBounds.getMinY());
+    ProjCoordinate max = new ProjCoordinate(lonLatBounds.getMaxX(), lonLatBounds.getMaxY());
+    ProjCoordinate minWorld = new ProjCoordinate();
+    ProjCoordinate maxWorld = new ProjCoordinate();
+    transformToEPSG3031.transform(min, minWorld);
+    transformToEPSG3031.transform(max, maxWorld);
+    return new Envelope(minWorld.x, maxWorld.x, minWorld.y, maxWorld.y);
   }
 
   /**
-   * Returns the longitude for a web mercator coordinate {@code x} where 0 is the international date line on the west
-   * side, 1 is the international date line on the east side, and 0.5 is the prime meridian.
+   * Returns the longitude for an EPSG 3031 coordinate {@code x}.
    */
   public static double getWorldLon(double x) {
-    return x * 360 - 180;
+    ProjCoordinate srcCoord = new ProjCoordinate(x, 0);
+    ProjCoordinate destCoord = new ProjCoordinate();
+    transformToWGS84.transform(srcCoord, destCoord);
+    return destCoord.x;
   }
 
   /**
-   * Returns the latitude for a web mercator {@code y} coordinate where 0 is the north edge of the map, 0.5 is the
-   * equator, and 1 is the south edge of the map.
+   * Returns the latitude for an EPSG 3031 coordinate {@code y}.
    */
   public static double getWorldLat(double y) {
-    double n = Math.PI - 2 * Math.PI * y;
-    return DEGREES_PER_RADIAN * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+    ProjCoordinate srcCoord = new ProjCoordinate(0, y);
+    ProjCoordinate destCoord = new ProjCoordinate();
+    transformToWGS84.transform(srcCoord, destCoord);
+    return destCoord.y;
   }
 
   /**
-   * Returns the web mercator X coordinate for {@code longitude} where 0 is the international date line on the west
-   * side, 1 is the international date line on the east side, and 0.5 is the prime meridian.
+   * Returns the EPSG 3031 X coordinate for {@code longitude}.
    */
   public static double getWorldX(double longitude) {
-    return (longitude + 180) / 360;
+    ProjCoordinate srcCoord = new ProjCoordinate(longitude, 0);
+    ProjCoordinate destCoord = new ProjCoordinate();
+    transformToEPSG3031.transform(srcCoord, destCoord);
+    return destCoord.x;
   }
 
   /**
-   * Returns the web mercator Y coordinate for {@code latitude} where 0 is the north edge of the map, 0.5 is the
-   * equator, and 1 is the south edge of the map.
+   * Returns the EPSG 3031 Y coordinate for {@code latitude}.
    */
   public static double getWorldY(double latitude) {
-    if (latitude <= MIN_LAT) {
-      return 1.1;
-    }
-    if (latitude >= MAX_LAT) {
-      return -0.1;
-    }
-    double sin = Math.sin(latitude * RADIANS_PER_DEGREE);
-    return 0.5 - 0.25 * Math.log((1 + sin) / (1 - sin)) / Math.PI;
+    ProjCoordinate srcCoord = new ProjCoordinate(0, latitude);
+    ProjCoordinate destCoord = new ProjCoordinate();
+    transformToEPSG3031.transform(srcCoord, destCoord);
+    return destCoord.y;
   }
 
   /**
@@ -192,27 +209,25 @@ public class GeoUtils {
    * can be decoded using {@link #decodeWorldX(long)} and {@link #decodeWorldY(long)}.
    */
   public static long encodeFlatLocation(double lon, double lat) {
-    double worldX = getWorldX(lon) + 1;
-    double worldY = getWorldY(lat) + 1;
+    double worldX = getWorldX(lon);
+    double worldY = getWorldY(lat);
     long x = (long) (worldX * HALF_QUANTIZED_WORLD_SIZE);
     long y = (long) (worldY * HALF_QUANTIZED_WORLD_SIZE);
     return (x << 32) | (y & LOWER_32_BIT_MASK);
   }
 
   /**
-   * Returns the web mercator Y coordinate of the latitude/longitude encoded with
-   * {@link #encodeFlatLocation(double, double)}.
+   * Returns the EPSG 3031 Y coordinate of the latitude/longitude encoded with {@link #encodeFlatLocation(double, double)}.
    */
   public static double decodeWorldY(long encoded) {
-    return ((encoded & LOWER_32_BIT_MASK) / HALF_QUANTIZED_WORLD_SIZE) - 1;
+    return ((encoded & LOWER_32_BIT_MASK) / HALF_QUANTIZED_WORLD_SIZE);
   }
 
   /**
-   * Returns the web mercator X coordinate of the latitude/longitude encoded with
-   * {@link #encodeFlatLocation(double, double)}.
+   * Returns the EPSG 3031 X coordinate of the latitude/longitude encoded with {@link #encodeFlatLocation(double, double)}.
    */
   public static double decodeWorldX(long encoded) {
-    return ((encoded >>> 32) / HALF_QUANTIZED_WORLD_SIZE) - 1;
+    return ((encoded >>> 32) / HALF_QUANTIZED_WORLD_SIZE);
   }
 
   /**
@@ -226,7 +241,7 @@ public class GeoUtils {
 
   /**
    * Returns an approximate zoom level that a map should be displayed at to show all of {@code envelope}, specified in
-   * web mercator coordinates.
+   * EPSG 3031 coordinates.
    */
   public static double getZoomFromWorldBounds(Envelope worldBounds) {
     double maxEdge = Math.max(worldBounds.getWidth(), worldBounds.getHeight());
@@ -235,6 +250,7 @@ public class GeoUtils {
 
   /** Returns the width in meters of a single pixel of a 256x256 px tile at the given {@code zoom} level. */
   public static double metersPerPixelAtEquator(int zoom) {
+    // This might need adjustment based on EPSG 3031 specifics; below is a generic calculation
     return WORLD_CIRCUMFERENCE_METERS / Math.pow(2d, zoom + 8d);
   }
 
@@ -287,17 +303,17 @@ public class GeoUtils {
   }
 
   public static Geometry combineLineStrings(List<LineString> lineStrings) {
-    return lineStrings.size() == 1 ? lineStrings.getFirst() : createMultiLineString(lineStrings);
+    return lineStrings.size() == 1 ? lineStrings.get(0) : createMultiLineString(lineStrings);
   }
-
+  
   public static Geometry combinePolygons(List<Polygon> polys) {
-    return polys.size() == 1 ? polys.getFirst() : createMultiPolygon(polys);
+    return polys.size() == 1 ? polys.get(0) : createMultiPolygon(polys);
   }
-
+  
   public static Geometry combinePoints(List<Point> points) {
-    return points.size() == 1 ? points.getFirst() : createMultiPoint(points);
+    return points.size() == 1 ? points.get(0) : createMultiPoint(points);
   }
-
+  
   /**
    * Returns a copy of {@code geom} with coordinates rounded to {@link #TILE_PRECISION} and fixes any polygon
    * self-intersections or overlaps that may have caused.
@@ -313,7 +329,7 @@ public class GeoUtils {
    * @throws GeometryException if an unrecoverable robustness exception prevents us from fixing the geometry
    */
   public static Geometry snapAndFixPolygon(Geometry geom, PrecisionModel tilePrecision, Stats stats, String stage)
-    throws GeometryException {
+      throws GeometryException {
     try {
       if (!geom.isValid()) {
         geom = fixPolygon(geom);
@@ -329,7 +345,7 @@ public class GeoUtils {
         return GeometryPrecisionReducer.reduce(geom, tilePrecision);
       } catch (TopologyException | IllegalArgumentException e2) {
         // give it one last try but with more aggressive fixing, just in case (see issue #511)
-        geom = fixPolygon(geom, tilePrecision.gridSize() / 2);
+        geom = fixPolygon(geom, tilePrecision.getScale() / 2);
         stats.dataError(stage + "_snap_fix_input3");
         try {
           return GeometryPrecisionReducer.reduce(geom, tilePrecision);
@@ -348,7 +364,6 @@ public class GeoUtils {
     }
     return value;
   }
-
 
   private static long longPair(int a, int b) {
     return (((long) a) << 32L) | (b & LOWER_32_BIT_MASK);
@@ -389,29 +404,34 @@ public class GeoUtils {
     if (lineStrings.isEmpty()) {
       throw new GeometryException("polygon_to_linestring_empty", "No line strings");
     } else if (lineStrings.size() == 1) {
-      return lineStrings.getFirst();
+      return lineStrings.get(0);
     } else {
       return createMultiLineString(lineStrings);
     }
   }
 
   private static void getLineStrings(Geometry input, List<LineString> output) throws GeometryException {
-    switch (input) {
-      case LinearRing linearRing -> output.add(JTS_FACTORY.createLineString(linearRing.getCoordinateSequence()));
-      case LineString lineString -> output.add(lineString);
-      case Polygon polygon -> {
+    switch (input.getGeometryType()) {
+      case "LinearRing" -> {
+        LinearRing linearRing = (LinearRing) input;
+        output.add(JTS_FACTORY.createLineString(linearRing.getCoordinateSequence()));
+      }
+      case "LineString" -> output.add((LineString) input);
+      case "Polygon" -> {
+        Polygon polygon = (Polygon) input;
         getLineStrings(polygon.getExteriorRing(), output);
         for (int i = 0; i < polygon.getNumInteriorRing(); i++) {
           getLineStrings(polygon.getInteriorRingN(i), output);
         }
       }
-      case GeometryCollection gc -> {
+      case "GeometryCollection" -> {
+        GeometryCollection gc = (GeometryCollection) input;
         for (int i = 0; i < gc.getNumGeometries(); i++) {
           getLineStrings(gc.getGeometryN(i), output);
         }
       }
-      case null, default -> throw new GeometryException("get_line_strings_bad_type",
-        "unrecognized geometry type: " + (input == null ? "null" : input.getGeometryType()));
+      default -> throw new GeometryException("get_line_strings_bad_type",
+          "unrecognized geometry type: " + (input == null ? "null" : input.getGeometryType()));
     }
   }
 
@@ -419,10 +439,12 @@ public class GeoUtils {
     return JTS_FACTORY.createGeometryCollection(polygonGroup.toArray(Geometry[]::new));
   }
 
-  /** Returns a point approximately {@code ratio} of the way from start to end and {@code offset} units to the right. */
+  /**
+   * Returns a point approximately {@code ratio} of the way from start to end and {@code offset} units to the right.
+   */
   public static Point pointAlongOffset(LineString lineString, double ratio, double offset) {
     int numPoints = lineString.getNumPoints();
-    int middle = Math.clamp((int) (numPoints * ratio), 0, numPoints - 2);
+    int middle = (int) Math.max(0, Math.min(numPoints * ratio, numPoints - 2));
     Coordinate a = lineString.getCoordinateN(middle);
     Coordinate b = lineString.getCoordinateN(middle + 1);
     LineSegment segment = new LineSegment(a, b);
